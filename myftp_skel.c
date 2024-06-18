@@ -3,6 +3,7 @@
 
 #include <string.h>
 #include <stdbool.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include <err.h>
 
@@ -25,7 +26,7 @@ bool recv_msg(int sd, int code, char *text) {
     int recv_s, recv_code;
 
     // receive the answer
-
+    recv_s = recv(sd, buffer, BUFSIZE, 0);
 
     // error checking
     if (recv_s < 0) warn("error receiving data");
@@ -56,7 +57,10 @@ void send_msg(int sd, char *operation, char *param) {
         sprintf(buffer, "%s\r\n", operation);
 
     // send command and check for errors
-
+    if(send(sd,buffer,BUFSIZE,0) < 0) {
+        printf("Error no se pudo mandar comando");
+    }
+    
 }
 
 /**
@@ -84,24 +88,30 @@ void authenticate(int sd) {
     input = read_input();
 
     // send the command to the server
-    
+    send_msg(sd, "USER", input);
     // relese memory
     free(input);
 
     // wait to receive password requirement and check for errors
-
+    if(recv_msg(sd, 331, NULL) == true) {
 
     // ask for password
     printf("passwd: ");
     input = read_input();
-
+    } else {
+        perror("Message of password doesn't print");
+    }
     // send the command to the server
-
-
+    send_msg(sd, "PASS", input);
     // release memory
     free(input);
 
     // wait for answer and process it and check for errors
+    if (recv_msg(sd, 530, NULL) == true) {
+        
+    } else {
+        recv_msg(sd, 230, NULL);
+    }
 
 }
 
@@ -143,9 +153,9 @@ void get(int sd, char *file_name) {
  **/
 void quit(int sd) {
     // send command QUIT to the client
-
+    
     // receive the answer from the server
-
+    
 }
 
 /**
@@ -188,16 +198,47 @@ int main (int argc, char *argv[]) {
     struct sockaddr_in addr;
 
     // arguments checking
+        if(argc != 3){
+            perror("Input must contain only three elements");
+            exit(EXIT_FAILURE);
+        }   
 
-    // create socket and check for errors
     
-    // set socket data    
+    // create socket and check for errors
+        sd = socket(PF_INET, SOCK_STREAM, 0);
+        if(sd == -1) {
+            perror("Something went wrong setting the socket");
+            exit(EXIT_FAILURE);
+        }
+        
+    // set socket data   
+        //set network format to ipv4
+        addr.sin_family = AF_INET;
+        //initialize sin_zero field memory space to all zero 
+        memset(addr.sin_zero, '\0', sizeof(addr.sin_zero));
+        //change string port format to network short format
+        addr.sin_port = htons(atoi(argv[2]));
+        //change string ipv4 format to ipv4 network format
+        if(inet_pton (AF_INET, argv[1], &(addr.sin_addr)) > 0) 
 
     // connect and check for errors
-
+        if(connect(sd, (struct sockaddr*) &(addr), sizeof(addr)) == -1){
+            perror("Can't establish connection with server");
+            close(sd);
+            exit(EXIT_FAILURE);
+        }
     // if receive hello proceed with authenticate and operate if not warning
-
+    if (recv_msg(sd, 220, NULL) == true){
+        authenticate(sd);
+        operate(sd);
+    }   
+    else {
+        perror("Something went wrong with HELLO message");
+    }
+    
+    
     // close socket
-
+        close(sd);
+    
     return 0;
 }

@@ -1,9 +1,11 @@
+#include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include <string.h>
 #include <stdbool.h>
 #include <stdarg.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include <err.h>
 
@@ -39,7 +41,10 @@ bool recv_cmd(int sd, char *operation, char *param) {
     int recv_s;
 
     // receive the command in the buffer and check for errors
-
+    recv_s = recv(sd,buffer,BUFSIZE,0);
+     // error checking
+    if (recv_s < 0) warn("error receiving data");
+    if (recv_s == 0) errx(1, "connection closed by host");
 
 
     // expunge the terminator characters from the buffer
@@ -81,6 +86,13 @@ bool send_ans(int sd, char *message, ...){
     vsprintf(buffer, message, args);
     va_end(args);
     // send answer preformated and check errors
+    if((send( sd,  buffer,  BUFSIZE,  0)) < 0){
+        printf("Something gets wrong when sending the message");
+        return false;
+    }
+    else {
+        return true;
+    }
 
 
 
@@ -94,7 +106,7 @@ bool send_ans(int sd, char *message, ...){
  **/
 
 void retr(int sd, char *file_path) {
-    FILE *file;    
+    FILE *file;
     int bread;
     long fsize;
     char buffer[BUFSIZE];
@@ -156,18 +168,26 @@ bool check_credentials(char *user, char *pass) {
  * return: true if login is succesfully, false if not
  **/
 bool authenticate(int sd) {
-    char user[PARSIZE], pass[PARSIZE];
+    char user[PARSIZE], pass[PARSIZE], msg[150];
 
     // wait to receive USER action
-
+    recv_cmd(sd,"USER",user);
 
     // ask for password
 
+    send_ans(sd, MSG_331, user);
     // wait to receive PASS action
-
+    recv_cmd(sd,"PASS", pass);
     // if credentials don't check denied login
-
+    if(check_credentials(user,pass) == false) {
+        send_ans(sd, MSG_530);
+        return false;
+    }
     // confirm login
+    else{
+        send_ans(sd, MSG_230, user);
+        return true;
+    }
 }
 
 /**
@@ -181,7 +201,7 @@ void operate(int sd) {
     while (true) {
         op[0] = param[0] = '\0';
         // check for commands send by the client if not inform and exit
-
+        
 
         if (strcmp(op, "RETR") == 0) {
             retr(sd, param);
@@ -216,22 +236,78 @@ int main (int argc, char *argv[]) {
     int master_sd, slave_sd;
     struct sockaddr_in master_addr, slave_addr;
 
+
+
+
+
+    // set socket data
+        //set network format to ipv4
+        master_addr.sin_family = AF_INET;
+        //initialize sin_zero field memory space to all zero
+        memset(master_addr.sin_zero, '\0', sizeof(master_addr.sin_zero));
+        //change string port format to network short format
+        master_addr.sin_port = htons(atoi(argv[1]));
+        //ip of the server
+        master_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
     // create server socket and check errors
-    
+        master_sd = socket(PF_INET, SOCK_STREAM, 0);
+        if(master_sd == -1){
+            perror("Something went wrong setting the socket");
+            exit(EXIT_FAILURE);
+        }
+
+    //unbind socket if its is already connected
+    int yes = 1;
+    if (setsockopt(master_sd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
+        perror("setsockopt");
+        close(master_sd);
+        exit(1);
+    }
+
+
     // bind master socket and check errors
+        if(bind(master_sd,(struct sockaddr *) &(master_addr), sizeof(master_addr)) == -1){
+            perror("Bind error");
+            close(master_sd);
+            exit(EXIT_FAILURE);
+        }
+
+    
 
     // make it listen
-
+    if(listen(master_sd, 5) == -1){
+        perror("Listen error");
+            close(master_sd);
+            exit(EXIT_FAILURE);
+    }
     // main loop
     while (true) {
-        // accept connectiones sequentially and check errors
+        // accept connections sequentially and check errors
+        socklen_t slaveaddr_len = sizeof(slave_addr);
+        slave_sd = accept(master_sd, (struct sockaddr *) &slave_addr, &slaveaddr_len);
+        if(slave_sd == -1){
+            perror("Accept conection error");
+            continue;
+        }
 
+        
         // send hello
-
+        int len = strlen(MSG_220);
+        send_ans(slave_sd, MSG_220);
         // operate only if authenticate is true
+
+        if(authenticate(slave_sd) == true){
+            operate(slave_sd);
+        }
+
+
+        
+        close(slave_sd);
+
     }
 
     // close server socket
-
+    close(master_sd);
     return 0;
 }
