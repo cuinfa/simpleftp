@@ -1,14 +1,12 @@
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
-
 #include <string.h>
 #include <stdbool.h>
 #include <stdarg.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <err.h>
-
 #include <netinet/in.h>
 
 #define BUFSIZE 512
@@ -23,291 +21,197 @@
 #define MSG_550 "550 %s: no such file or directory\r\n"
 #define MSG_299 "299 File %s size %ld bytes\r\n"
 #define MSG_226 "226 Transfer complete\r\n"
+#define MSG_200 "200 Command okay\r\n"
 
-/**
- * function: receive the commands from the client
- * sd: socket descriptor
- * operation: \0 if you want to know the operation received
- *            OP if you want to check an especific operation
- *            ex: recv_cmd(sd, "USER", param)
- * param: parameters for the operation involve
- * return: only usefull if you want to check an operation
- *         ex: for login you need the seq USER PASS
- *             you can check if you receive first USER
- *             and then check if you receive PASS
- **/
+typedef struct {
+    int data_sd;
+    struct sockaddr_in data_addr;
+} data_connection_t;
+
+// Función para recibir comandos del cliente
 bool recv_cmd(int sd, char *operation, char *param) {
     char buffer[BUFSIZE], *token;
     int recv_s;
 
-    // receive the command in the buffer and check for errors
-    recv_s = recv(sd,buffer,BUFSIZE,0);
-     // error checking
+    recv_s = recv(sd, buffer, BUFSIZE, 0);
     if (recv_s < 0) warn("error receiving data");
     if (recv_s == 0) errx(1, "connection closed by host");
 
-
-    // expunge the terminator characters from the buffer
     buffer[strcspn(buffer, "\r\n")] = 0;
 
-    // complex parsing of the buffer
-    // extract command receive in operation if not set \0
-    // extract parameters of the operation in param if it needed
     token = strtok(buffer, " ");
     if (token == NULL || strlen(token) < 4) {
         warn("not valid ftp command");
         return false;
     } else {
         if (operation[0] == '\0') strcpy(operation, token);
-        if (strcmp(operation, token)) {
-            warn("abnormal client flow: did not send %s command", operation);
-            return false;
-        }
         token = strtok(NULL, " ");
         if (token != NULL) strcpy(param, token);
     }
     return true;
 }
 
-/**
- * function: send answer to the client
- * sd: file descriptor
- * message: formatting string in printf format
- * ...: variable arguments for economics of formats
- * return: true if not problem arise or else
- * notes: the MSG_x have preformated for these use
- **/
-bool send_ans(int sd, char *message, ...){
+// Función para enviar respuestas al cliente
+bool send_ans(int sd, const char *message, ...) {
+    va_list args;
     char buffer[BUFSIZE];
 
-    va_list args;
     va_start(args, message);
-
     vsprintf(buffer, message, args);
     va_end(args);
-    // send answer preformated and check errors
-    if((send( sd,  buffer,  BUFSIZE,  0)) < 0){
-        printf("Something gets wrong when sending the message");
+
+    if (send(sd, buffer, strlen(buffer), 0) == -1) {
+        warn("error sending data to client");
         return false;
     }
-    else {
-        return true;
-    }
-
-
-
-
+    return true;
 }
 
-/**
- * function: RETR operation
- * sd: socket descriptor
- * file_path: name of the RETR file
- **/
+// Función para autenticar al usuario
+bool authenticate(int sd) {
+    char user[PARSIZE], pass[PARSIZE], operation[CMDSIZE];
 
-void retr(int sd, char *file_path) {
+    if (recv_cmd(sd, "USER", user)) {
+        if (send_ans(sd, MSG_331, user)) {
+            if (recv_cmd(sd, "PASS", pass)) {
+                if (!strcmp(user, "admin") && !strcmp(pass, "admin")) {
+                    return send_ans(sd, MSG_230, user);
+                } else {
+                    return send_ans(sd, MSG_530);
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Función para manejar el comando PORT
+data_connection_t handle_port_command(int sd, char *param) {
+    data_connection_t data_conn;
+    int h1, h2, h3, h4, p1, p2;
+    char ip[16];
+
+    sscanf(param, "%d,%d,%d,%d,%d,%d", &h1, &h2, &h3, &h4, &p1, &p2);
+    snprintf(ip, sizeof(ip), "%d.%d.%d.%d", h1, h2, h3, h4);
+
+    data_conn.data_sd = socket(PF_INET, SOCK_STREAM, 0);
+    if (data_conn.data_sd < 0) {
+        perror("Error creating data socket");
+        data_conn.data_sd = -1;
+        return data_conn;
+    }
+
+    data_conn.data_addr.sin_family = AF_INET;
+    data_conn.data_addr.sin_port = htons(p1 * 256 + p2);
+    inet_pton(AF_INET, ip, &data_conn.data_addr.sin_addr);
+
+    if (connect(data_conn.data_sd, (struct sockaddr *) &data_conn.data_addr, sizeof(data_conn.data_addr)) < 0) {
+        perror("Error connecting data socket");
+        close(data_conn.data_sd);
+        data_conn.data_sd = -1;
+    }
+
+    return data_conn;
+}
+
+// Función para transferir un archivo al cliente
+bool retr(int sd, char *file_name, data_connection_t data_conn) {
     FILE *file;
-    int bread;
-    long fsize;
     char buffer[BUFSIZE];
+    long file_size;
+    int read_s;
 
-    // check if file exists if not inform error to client
-
-    // send a success message with the file length
-
-    // important delay for avoid problems with buffer size
-    sleep(1);
-
-    // send the file
-
-    // close the file
-
-    // send a completed transfer message
-}
-/**
- * funcion: check valid credentials in ftpusers file
- * user: login user name
- * pass: user password
- * return: true if found or false if not
- **/
-bool check_credentials(char *user, char *pass) {
-    FILE *file;
-    char *path = "./ftpusers", *line = NULL, credentials[100];
-    size_t line_size = 0;
-    bool found = false;
-
-    // make the credential string
-    sprintf(credentials, "%s:%s", user, pass);
-
-    // check if ftpusers file it's present
-    if ((file = fopen(path, "r"))==NULL) {
-        warn("Error opening %s", path);
+    file = fopen(file_name, "rb");
+    if (file == NULL) {
+        send_ans(sd, MSG_550, file_name);
         return false;
     }
 
-    // search for credential string
-    while (getline(&line, &line_size, file) != -1) {
-        strtok(line, "\n");
-        if (strcmp(line, credentials) == 0) {
-            found = true;
-            break;
+    fseek(file, 0L, SEEK_END);
+    file_size = ftell(file);
+    rewind(file);
+
+    if (!send_ans(sd, MSG_299, file_name, file_size)) {
+        fclose(file);
+        return false;
+    }
+
+    while ((read_s = fread(buffer, 1, BUFSIZE, file)) > 0) {
+        if (send(data_conn.data_sd, buffer, read_s, 0) < 0) {
+            perror("Error sending file data");
+            fclose(file);
+            return false;
         }
     }
 
-    // close file and release any pointers if necessary
     fclose(file);
-    if (line) free(line);
-
-    // return search status
-    return found;
+    close(data_conn.data_sd);
+    return send_ans(sd, MSG_226);
 }
 
-/**
- * function: login process management
- * sd: socket descriptor
- * return: true if login is succesfully, false if not
- **/
-bool authenticate(int sd) {
-    char user[PARSIZE], pass[PARSIZE], msg[150];
-
-    // wait to receive USER action
-    recv_cmd(sd,"USER",user);
-
-    // ask for password
-
-    send_ans(sd, MSG_331, user);
-    // wait to receive PASS action
-    recv_cmd(sd,"PASS", pass);
-    // if credentials don't check denied login
-    if(check_credentials(user,pass) == false) {
-        send_ans(sd, MSG_530);
-        return false;
-    }
-    // confirm login
-    else{
-        send_ans(sd, MSG_230, user);
-        return true;
-    }
-}
-
-/**
- *  function: execute all commands (RETR|QUIT)
- *  sd: socket descriptor
- **/
-
+// Función para manejar las operaciones del cliente
 void operate(int sd) {
-    char op[CMDSIZE], param[PARSIZE];
+    char operation[CMDSIZE], param[PARSIZE];
+    data_connection_t data_conn;
 
     while (true) {
-        op[0] = param[0] = '\0';
-        // check for commands send by the client if not inform and exit
-        
+        operation[0] = '\0';
+        param[0] = '\0';
 
-        if (strcmp(op, "RETR") == 0) {
-            retr(sd, param);
-        } else if (strcmp(op, "QUIT") == 0) {
-            // send goodbye and close connection
-
-
-
-
-            break;
-        } else {
-            // invalid command
-            // furute use
+        if (recv_cmd(sd, operation, param)) {
+            if (!strcmp(operation, "QUIT")) {
+                send_ans(sd, MSG_221);
+                break;
+            } else if (!strcmp(operation, "RETR")) {
+                if (data_conn.data_sd != -1)
+                    retr(sd, param, data_conn);
+                else
+                    send_ans(sd, MSG_550, param);
+            } else if (!strcmp(operation, "PORT")) {
+                data_conn = handle_port_command(sd, param);
+                if (data_conn.data_sd != -1) send_ans(sd, MSG_200);
+            } else {
+                warn("command not implemented: %s", operation);
+            }
         }
     }
 }
 
-/**
- * Run with
- *         ./mysrv <SERVER_PORT>
- **/
-int main (int argc, char *argv[]) {
-
-    // arguments checking
-    if (argc < 2) {
-        errx(1, "Port expected as argument");
-    } else if (argc > 2) {
-        errx(1, "Too many arguments");
-    }
-
-    // reserve sockets and variables space
+int main(int argc, char *argv[]) {
     int master_sd, slave_sd;
     struct sockaddr_in master_addr, slave_addr;
 
+    if (argc != 2) errx(EXIT_FAILURE, "usage: %s port", argv[0]);
 
+    master_sd = socket(PF_INET, SOCK_STREAM, 0);
+    if (master_sd == -1) err(EXIT_FAILURE, "cannot create socket");
 
+    master_addr.sin_family = AF_INET;
+    master_addr.sin_port = htons(atoi(argv[1]));
+    master_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-
-    // set socket data
-        //set network format to ipv4
-        master_addr.sin_family = AF_INET;
-        //initialize sin_zero field memory space to all zero
-        memset(master_addr.sin_zero, '\0', sizeof(master_addr.sin_zero));
-        //change string port format to network short format
-        master_addr.sin_port = htons(atoi(argv[1]));
-        //ip of the server
-        master_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-    // create server socket and check errors
-        master_sd = socket(PF_INET, SOCK_STREAM, 0);
-        if(master_sd == -1){
-            perror("Something went wrong setting the socket");
-            exit(EXIT_FAILURE);
-        }
-
-    //unbind socket if its is already connected
-    int yes = 1;
-    if (setsockopt(master_sd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
-        perror("setsockopt");
+    if (bind(master_sd, (struct sockaddr *) &master_addr, sizeof(master_addr)) == -1) {
+        perror("Cannot bind socket");
         close(master_sd);
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
-
-    // bind master socket and check errors
-        if(bind(master_sd,(struct sockaddr *) &(master_addr), sizeof(master_addr)) == -1){
-            perror("Bind error");
-            close(master_sd);
-            exit(EXIT_FAILURE);
-        }
-
-    
-
-    // make it listen
-    if(listen(master_sd, 5) == -1){
-        perror("Listen error");
-            close(master_sd);
-            exit(EXIT_FAILURE);
+    if (listen(master_sd, 3) == -1) {
+        perror("Cannot listen on socket");
+        close(master_sd);
+        exit(EXIT_FAILURE);
     }
-    // main loop
-    while (true) {
-        // accept connections sequentially and check errors
-        socklen_t slaveaddr_len = sizeof(slave_addr);
-        slave_sd = accept(master_sd, (struct sockaddr *) &slave_addr, &slaveaddr_len);
-        if(slave_sd == -1){
-            perror("Accept conection error");
-            continue;
+
+    socklen_t addrlen = sizeof(slave_addr);
+    while ((slave_sd = accept(master_sd, (struct sockaddr *) &slave_addr, &addrlen)) > 0) {
+        if (send_ans(slave_sd, MSG_220)) {
+            if (authenticate(slave_sd)) {
+                operate(slave_sd);
+            }
         }
-
-        
-        // send hello
-        int len = strlen(MSG_220);
-        send_ans(slave_sd, MSG_220);
-        // operate only if authenticate is true
-
-        if(authenticate(slave_sd) == true){
-            operate(slave_sd);
-        }
-
-
-        
         close(slave_sd);
-
     }
 
-    // close server socket
     close(master_sd);
     return 0;
 }

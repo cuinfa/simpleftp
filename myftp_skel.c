@@ -1,167 +1,184 @@
+#include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
-
 #include <string.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <err.h>
-
 #include <netinet/in.h>
-#include <arpa/inet.h>
 
 #define BUFSIZE 512
+#define CMDSIZE 4
+#define PARSIZE 100
 
-/**
- * function: receive and analize the answer from the server
- * sd: socket descriptor
- * code: three leter numerical code to check if received
- * text: normally NULL but if a pointer if received as parameter
- *       then a copy of the optional message from the response
- *       is copied
- * return: result of code checking
- **/
-bool recv_msg(int sd, int code, char *text) {
-    char buffer[BUFSIZE], message[BUFSIZE];
-    int recv_s, recv_code;
-
-    // receive the answer
-    recv_s = recv(sd, buffer, BUFSIZE, 0);
-
-    // error checking
-    if (recv_s < 0) warn("error receiving data");
-    if (recv_s == 0) errx(1, "connection closed by host");
-
-    // parsing the code and message receive from the answer
-    sscanf(buffer, "%d %[^\r\n]\r\n", &recv_code, message);
-    printf("%d %s\n", recv_code, message);
-    // optional copy of parameters
-    if(text) strcpy(text, message);
-    // boolean test for the code
-    return (code == recv_code) ? true : false;
-}
-
-/**
- * function: send command formated to the server
- * sd: socket descriptor
- * operation: four letters command
- * param: command parameters
- **/
-void send_msg(int sd, char *operation, char *param) {
-    char buffer[BUFSIZE] = "";
-
-    // command formating
-    if (param != NULL)
-        sprintf(buffer, "%s %s\r\n", operation, param);
+// Función para enviar mensajes al servidor
+void send_msg(int sd, const char *cmd, const char *param) {
+    char buffer[BUFSIZE];
+    if (param)
+        snprintf(buffer, sizeof(buffer), "%s %s\r\n", cmd, param);
     else
-        sprintf(buffer, "%s\r\n", operation);
-
-    // send command and check for errors
-    if(send(sd,buffer,BUFSIZE,0) < 0) {
-        printf("Error no se pudo mandar comando");
-    }
-    
+        snprintf(buffer, sizeof(buffer), "%s\r\n", cmd);
+    send(sd, buffer, strlen(buffer), 0);
 }
 
-/**
- * function: simple input from keyboard
- * return: input without ENTER key
- **/
-char * read_input() {
+// Función para recibir mensajes del servidor
+bool recv_msg(int sd, int expect_code, char *buffer) {
+    char recv_buffer[BUFSIZE];
+    int code;
+
+    int recv_len = recv(sd, recv_buffer, sizeof(recv_buffer) - 1, 0);
+    if (recv_len < 0) {
+        perror("Error receiving data");
+        return false;
+    }
+    recv_buffer[recv_len] = '\0';
+
+    sscanf(recv_buffer, "%d", &code);
+    if (code != expect_code) {
+        if (buffer) strcpy(buffer, recv_buffer);
+        return false;
+    }
+    if (buffer) strcpy(buffer, recv_buffer);
+    return true;
+}
+
+// Función para leer la entrada del usuario
+char *read_input() {
     char *input = malloc(BUFSIZE);
     if (fgets(input, BUFSIZE, stdin)) {
-        return strtok(input, "\n");
+        input[strcspn(input, "\n")] = 0; // Eliminar el carácter de nueva línea
+        return input;
     }
+    free(input);
     return NULL;
 }
 
-/**
- * function: login process from the client side
- * sd: socket descriptor
- **/
+// Función para autenticar al usuario
 void authenticate(int sd) {
-    char *input, desc[100];
-    int code;
+    char *input;
 
-    // ask for user
     printf("username: ");
     input = read_input();
-
-    // send the command to the server
     send_msg(sd, "USER", input);
-    // relese memory
     free(input);
 
-    // wait to receive password requirement and check for errors
-    if(recv_msg(sd, 331, NULL) == true) {
+    if (recv_msg(sd, 331, NULL)) {
+        printf("passwd: ");
+        input = read_input();
+        send_msg(sd, "PASS", input);
+        free(input);
 
-    // ask for password
-    printf("passwd: ");
-    input = read_input();
+        if (!recv_msg(sd, 230, NULL)) {
+            recv_msg(sd, 530, NULL);
+            exit(1);
+        }
     } else {
         perror("Message of password doesn't print");
+        exit(1);
     }
-    // send the command to the server
-    send_msg(sd, "PASS", input);
-    // release memory
-    free(input);
-
-    // wait for answer and process it and check for errors
-    if (recv_msg(sd, 530, NULL) == true) {
-        
-    } else {
-        recv_msg(sd, 230, NULL);
-    }
-
 }
 
-/**
- * function: operation get
- * sd: socket descriptor
- * file_name: file name to get from the server
- **/
+// Función para enviar el comando PORT al servidor
+void port(int sd, const char *ip, int port) {
+    char buffer[BUFSIZE];
+    snprintf(buffer, sizeof(buffer), "%s,%d,%d",
+             ip, port / 256, port % 256);
+    send_msg(sd, "PORT", buffer);
+    if (!recv_msg(sd, 200, NULL)) {
+        perror("Error in PORT command");
+    }
+}
+
+// Función para descargar un archivo del servidor
 void get(int sd, char *file_name) {
-    char desc[BUFSIZE], buffer[BUFSIZE];
-    int f_size, recv_s, r_size = BUFSIZE;
+    char buffer[BUFSIZE];
+    int file_size, recv_s;
     FILE *file;
+    int data_sd;
+    struct sockaddr_in data_addr;
+    socklen_t addr_len = sizeof(data_addr);
 
-    // send the RETR command to the server
+    // Configuración de la conexión de datos
+    data_sd = socket(PF_INET, SOCK_STREAM, 0);
+    data_addr.sin_family = AF_INET;
+    data_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    data_addr.sin_port = 0; // Dejar que el SO asigne un puerto
 
-    // check for the response
+    if (bind(data_sd, (struct sockaddr *) &data_addr, sizeof(data_addr)) < 0) {
+        perror("Error binding data socket");
+        close(data_sd);
+        return;
+    }
 
-    // parsing the file size from the answer received
-    // "File %s size %ld bytes"
-    sscanf(buffer, "File %*s size %d bytes", &f_size);
+    if (listen(data_sd, 1) < 0) {
+        perror("Error listening on data socket");
+        close(data_sd);
+        return;
+    }
 
-    // open the file to write
-    file = fopen(file_name, "w");
+    getsockname(data_sd, (struct sockaddr *) &data_addr, &addr_len);
+    char ip[16];
+    inet_ntop(AF_INET, &data_addr.sin_addr, ip, sizeof(ip));
+    int port = ntohs(data_addr.sin_port);
 
-    //receive the file
+    // Enviar comando PORT al servidor
+    port(sd, ip, port);
 
+    // Enviar comando RETR
+    send_msg(sd, "RETR", file_name);
 
+    if (recv_msg(sd, 299, buffer)) {
+        sscanf(buffer, "File %*s size %d bytes", &file_size);
 
-    // close the file
-    fclose(file);
+        file = fopen(file_name, "wb");
+        if (file == NULL) {
+            perror("Error opening file");
+            return;
+        }
 
-    // receive the OK from the server
+        int client_sd = accept(data_sd, (struct sockaddr *) &data_addr, &addr_len);
+        if (client_sd < 0) {
+            perror("Error accepting data connection");
+            fclose(file);
+            close(data_sd);
+            return;
+        }
 
+        while (file_size > 0) {
+            recv_s = recv(client_sd, buffer, BUFSIZE, 0);
+            if (recv_s <= 0) {
+                perror("Error receiving file data");
+                break;
+            }
+
+            fwrite(buffer, 1, recv_s, file);
+            file_size -= recv_s;
+        }
+
+        close(client_sd);
+        fclose(file);
+
+        if (recv_msg(sd, 226, NULL)) {
+            printf("File transfer complete\n");
+        } else {
+            printf("Error during file transfer\n");
+        }
+    } else {
+        recv_msg(sd, 550, NULL);
+    }
+
+    close(data_sd);
 }
 
-/**
- * function: operation quit
- * sd: socket descriptor
- **/
+// Función para enviar el comando QUIT al servidor
 void quit(int sd) {
-    // send command QUIT to the client
-    
-    // receive the answer from the server
-    
+    send_msg(sd, "QUIT", NULL);
+    recv_msg(sd, 221, NULL);
 }
 
-/**
- * function: make all operations (get|quit)
- * sd: socket descriptor
- **/
+// Función para manejar las operaciones del cliente
 void operate(int sd) {
     char *input, *op, *param;
 
@@ -169,19 +186,17 @@ void operate(int sd) {
         printf("Operation: ");
         input = read_input();
         if (input == NULL)
-            continue; // avoid empty input
+            continue;
         op = strtok(input, " ");
-        // free(input);
+
         if (strcmp(op, "get") == 0) {
             param = strtok(NULL, " ");
-            get(sd, param);
-        }
-        else if (strcmp(op, "quit") == 0) {
+            if (param) get(sd, param);
+            else printf("Filename required\n");
+        } else if (strcmp(op, "quit") == 0) {
             quit(sd);
             break;
-        }
-        else {
-            // new operations in the future
+        } else {
             printf("TODO: unexpected command\n");
         }
         free(input);
@@ -189,56 +204,43 @@ void operate(int sd) {
     free(input);
 }
 
-/**
- * Run with
- *         ./myftp <SERVER_IP> <SERVER_PORT>
- **/
-int main (int argc, char *argv[]) {
+int main(int argc, char *argv[]) {
     int sd;
     struct sockaddr_in addr;
 
-    // arguments checking
-        if(argc != 3){
-            perror("Input must contain only three elements");
-            exit(EXIT_FAILURE);
-        }   
+    if (argc != 3) {
+        perror("Input must contain only three elements");
+        exit(EXIT_FAILURE);
+    }
 
-    
-    // create socket and check for errors
-        sd = socket(PF_INET, SOCK_STREAM, 0);
-        if(sd == -1) {
-            perror("Something went wrong setting the socket");
-            exit(EXIT_FAILURE);
-        }
-        
-    // set socket data   
-        //set network format to ipv4
-        addr.sin_family = AF_INET;
-        //initialize sin_zero field memory space to all zero 
-        memset(addr.sin_zero, '\0', sizeof(addr.sin_zero));
-        //change string port format to network short format
-        addr.sin_port = htons(atoi(argv[2]));
-        //change string ipv4 format to ipv4 network format
-        if(inet_pton (AF_INET, argv[1], &(addr.sin_addr)) > 0) 
+    sd = socket(PF_INET, SOCK_STREAM, 0);
+    if (sd == -1) {
+        perror("Something went wrong setting the socket");
+        exit(EXIT_FAILURE);
+    }
 
-    // connect and check for errors
-        if(connect(sd, (struct sockaddr*) &(addr), sizeof(addr)) == -1){
-            perror("Can't establish connection with server");
-            close(sd);
-            exit(EXIT_FAILURE);
-        }
-    // if receive hello proceed with authenticate and operate if not warning
-    if (recv_msg(sd, 220, NULL) == true){
+    addr.sin_family = AF_INET;
+    memset(addr.sin_zero, '\0', sizeof(addr.sin_zero));
+    addr.sin_port = htons(atoi(argv[2]));
+
+    if (inet_pton(AF_INET, argv[1], &(addr.sin_addr)) <= 0) {
+        perror("Invalid address");
+        exit(EXIT_FAILURE);
+    }
+
+    if (connect(sd, (struct sockaddr *) &addr, sizeof(addr)) == -1) {
+        perror("Can't establish connection with server");
+        close(sd);
+        exit(EXIT_FAILURE);
+    }
+
+    if (recv_msg(sd, 220, NULL)) {
         authenticate(sd);
         operate(sd);
-    }   
-    else {
+    } else {
         perror("Something went wrong with HELLO message");
     }
-    
-    
-    // close socket
-        close(sd);
-    
+
+    close(sd);
     return 0;
 }
